@@ -13,11 +13,10 @@ def initialize_openpose():
         "net_resolution": "-1x368",
         "model_pose": "COCO",
         "number_people_max": 1,
-        "keypoint_threshold": 0.2,
         "render_threshold": 0.05,
         "disable_blending": False,
         "tracking": 1,
-        "scale_number": 3,
+        "scale_number": 1,
         "scale_gap": 0.25
     }
     opWrapper = op.WrapperPython()
