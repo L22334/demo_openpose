@@ -54,7 +54,15 @@ class EnhancedPoseFeatureExtractor:
             'hand_to_hip_right': np.linalg.norm(pose[RIGHT_WRIST] - pose[RIGHT_HIP]),
         }
 
-        return {**angles, **heights, **symmetry, **distances}
+        # 添加更多相关特征
+        torso_angle = EnhancedPoseFeatureExtractor.calculate_angle(mid_shoulder, mid_hip, vertical_line)
+        leg_symmetry = abs(angles['left_hip'] - angles['right_hip'])
+        arm_height_diff = abs(heights['left_wrist'] - heights['right_wrist'])
+        
+        return {**angles, **heights, **symmetry, **distances, 
+                'torso_angle': torso_angle, 
+                'leg_symmetry': leg_symmetry,
+                'arm_height_diff': arm_height_diff}
 
     @staticmethod
     def extract_dynamic_features(pose_history: List[np.ndarray]) -> Dict[str, float]:
@@ -88,12 +96,18 @@ class EnhancedPoseFeatureExtractor:
             'spine_angular_acceleration': float(np.mean(np.abs(angular_accelerations)))
         })
 
+        # 添加更多动态特征
+        pose_change_rate = np.mean(np.abs(np.diff(pose_history, axis=0)))
+        
+        dynamic_features['pose_change_rate'] = float(np.mean(pose_change_rate))
+        
         return dynamic_features
 
 class TemporalActionRecognizer:
-    def __init__(self, window_size: int = 10):
+    def __init__(self, window_size: int = 5):  # 减小窗口大小以提高响应速度
         self.window_size = window_size
         self.pose_history = deque(maxlen=window_size)
+        self.action_history = deque(maxlen=window_size)
 
     def update(self, pose: np.ndarray):
         self.pose_history.append(pose)
@@ -107,20 +121,39 @@ class TemporalActionRecognizer:
 
         return {**static_features, **dynamic_features}
 
+    def smooth_action(self, current_action: Dict[str, int]) -> Dict[str, int]:
+        self.action_history.append(current_action)
+        
+        if len(self.action_history) < self.window_size:
+            return current_action
+
+        smoothed_action = {}
+        for group in ['group1', 'group2', 'group3']:
+            actions = [action[group] for action in self.action_history]
+            # 使用加权投票,最近的动作权重更大
+            weighted_actions = [(action, weight) for action, weight in zip(actions, range(1, len(actions)+1))]
+            smoothed_action[group] = max(weighted_actions, key=lambda x: x[1])[0]
+
+        return smoothed_action
+
 class ActionClassifier:
     @staticmethod
     def classify_group1(features: Dict[str, float]) -> int:
         spine_angle = features['spine']
-        shoulder_angle_diff = features['shoulder']
-        spine_velocity = features.get('spine_velocity', 0)
+        torso_angle = features['torso_angle']
+        pose_change_rate = features.get('pose_change_rate', 0)
 
-        probs = np.array([
-            norm(Constants.SPINE_ANGLE_MEAN, Constants.SPINE_ANGLE_STD).pdf(spine_angle),
-            norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle),
-            shoulder_angle_diff > Constants.SHOULDER_ANGLE_DIFF_THRESHOLD,
-            norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle) * (spine_velocity > 5)
-        ])
-        return np.argmax(probs) + 1
+        if spine_angle > 160:
+            return 1  # 站直
+        elif spine_angle < 120:
+            if abs(torso_angle - 90) > 30 and pose_change_rate > 5:
+                return 4  # 弯曲同时转身
+            else:
+                return 2  # 弯曲
+        elif abs(torso_angle - 90) > 30:
+            return 3  # 转身
+        else:
+            return 1  # 默认为站直
 
     @staticmethod
     def classify_group2(features: Dict[str, float]) -> int:
@@ -189,4 +222,6 @@ def calculate_uncertainty(pose: np.ndarray, temporal_recognizer: TemporalActionR
                        features['left_hip'], features['right_hip']]
     feature_consistency = np.std(static_features)
 
-    return 1 / (1 + np.exp(-(pose_stability + feature_consistency)))
+    # 调整不确定性计算公式
+    uncertainty = 1 / (1 + np.exp(-(pose_stability * 0.5 + feature_consistency * 0.5 - 1)))
+    return uncertainty
