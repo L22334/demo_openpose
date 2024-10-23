@@ -1,6 +1,7 @@
-datasets
-openpose
-video
-output_2.mp4
-output_with_action_numbers.mp4
-output_with_action.mp4
+datasets/
+openpose/
+video/
+__pycache__/
+*.mp4
+*.mov
+*.pyc
