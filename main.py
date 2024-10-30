@@ -1,10 +1,13 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK']='TRUE'
+
 import cv2
 import numpy as np
 import openpose.pyopenpose as op
 import torch
 from fn import PoseKalmanFilter, calculate_angles_with_points, draw_angle, draw_single
 from lib.model import PosePredictor
-from uncertainty_handling import TemporalActionRecognizer, recognize_action, calculate_uncertainty
+from uncertainty_handling import TemporalActionRecognizer, recognize_action, calculate_uncertainty, calculate_action_confidence
 
 
 def initialize_openpose():
@@ -79,14 +82,85 @@ def process_frame(frame, opWrapper, pose_model, pose_kf, temporal_recognizer):
             for key, data in angles_with_points.items():
                 pred_img = draw_angle(pred_img, data["point"], data["angle"], data["side"])
 
+        action_descriptions = {
+            'group1': {
+                1: "站直",
+                2: "弯曲",
+                3: "转身",
+                4: "弯曲同时转身"
+            },
+            'group2': {
+                1: "双臂低于肩膀",
+                2: "一个手臂高于肩膀",
+                3: "双臂高于肩膀"
+            },
+            'group3': {
+                1: "坐姿",
+                2: "双腿站直",
+                3: "单腿站直",
+                4: "双腿弯曲",
+                5: "单腿弯曲站立",
+                6: "跪姿或蹲姿"
+            }
+        }
+
+        # 使用支持中文的字体
+        font_path = "C:/Windows/Fonts/simhei.ttf"  
+        try:
+            from PIL import ImageFont, ImageDraw, Image
+            font = ImageFont.truetype(font_path, 20)
+            
+            def cv2AddChineseText(img, text, position, color):
+                img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                draw = ImageDraw.Draw(img_pil)
+                draw.text(position, text, font=font, fill=color)
+                return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+                
+            # 修改文本绘制部分
             y_offset = 60
             for group, action_id in action_recognition.items():
-                action_text = f"{group}: {action_id}"
-                cv2.putText(pred_img, action_text, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                action_desc = action_descriptions[group][action_id]
+                confidence = calculate_action_confidence(
+                    temporal_recognizer.extract_features(), 
+                    int(group[-1]),
+                    action_id
+                )
+                
+                color = (
+                    0,  # B
+                    int(255 * confidence),  # G
+                    int(255 * (1 - confidence))  # R
+                )
+                
+                action_text = f"{group}: {action_desc} ({confidence:.2f})"
+                pred_img = cv2AddChineseText(pred_img, action_text, (10, y_offset), color[::-1])  # 注意颜色需要反转RGB->BGR
                 y_offset += 30
+                
+        except Exception as e:
+            print(f"Error drawing Chinese text: {e}")
 
-            cv2.putText(pred_img, f"uncertain: {uncertainty:.2f}", (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (255, 255, 255), 1)
+        uncertainty_color = (
+            0,  # B
+            int(255 * (1 - uncertainty)),  # G
+            int(255 * uncertainty)  # R
+        )
+        cv2.putText(pred_img, f"Uncertainty: {uncertainty:.2f}", 
+                    (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 
+                    0.5, uncertainty_color, 1)
+
+        legend_y = y_offset + 30
+        cv2.putText(pred_img, "Keypoints Legend:", (10, legend_y), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        legend_y += 20
+        cv2.line(pred_img, (10, legend_y), (30, legend_y), 
+                 (0, 255, 0), 2)  # 绿色线代表骨骼
+        cv2.putText(pred_img, "Skeleton", (35, legend_y), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        legend_y += 20
+        cv2.circle(pred_img, (20, legend_y), 5, (0, 255, 0), -1)
+        cv2.putText(pred_img, "Angle Point", (35, legend_y), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
     return np.hstack((frame_resized, input_img, pred_img))
 
@@ -99,8 +173,14 @@ def main():
     temporal_recognizer = TemporalActionRecognizer()
 
     cap = cv2.VideoCapture(video_path)
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    out = cv2.VideoWriter('output_with_action_numbers.mp4', fourcc, 20.0, (1920, 640))
+    
+    # 检查视频是否成功打开
+    if not cap.isOpened():
+        print("Error: Could not open video file")
+        return
+        
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    current_frame = 0
 
     try:
         while cap.isOpened():
@@ -108,18 +188,49 @@ def main():
             if not ret:
                 break
 
-            combined_img = process_frame(frame, opWrapper, pose_model, pose_kf, temporal_recognizer)
+            combined_img = process_frame(frame, opWrapper, pose_model, 
+                                      pose_kf, temporal_recognizer)
+
+            # 添加进度条
+            progress = current_frame / total_frames
+            progress_bar_width = combined_img.shape[1] - 20
+            progress_x = int(progress * progress_bar_width)
+            
+            # 使用深色背景使进度条更清晰
+            cv2.rectangle(combined_img, 
+                         (10, combined_img.shape[0] - 35),
+                         (combined_img.shape[1] - 10, combined_img.shape[0] - 15),
+                         (0, 0, 0), -1)  # 黑色背景
+            
+            # 进度条
+            cv2.rectangle(combined_img, 
+                         (10, combined_img.shape[0] - 30),
+                         (progress_x, combined_img.shape[0] - 20),
+                         (0, 255, 0), -1)
+
+            # 进度文本
+            cv2.putText(combined_img, 
+                       f"Processing: {int(progress * 100)}%",
+                       (10, combined_img.shape[0] - 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
             cv2.imshow("OpenPose with Action Recognition", combined_img)
-            out.write(combined_img)
+            current_frame += 1
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            elif key == ord(' '):  # 空格键暂停
+                cv2.waitKey(0)
+
+    except Exception as e:
+        print(f"Error during video processing: {e}")
+        
     finally:
-        out.release()
+        print("Cleaning up...")
         cap.release()
         cv2.destroyAllWindows()
-
+        print("Done!")
 
 if __name__ == "__main__":
     main()

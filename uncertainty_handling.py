@@ -6,16 +6,20 @@ from dataclasses import dataclass
 
 @dataclass
 class Constants:
-    SPINE_ANGLE_MEAN: float = 170
-    SPINE_ANGLE_STD: float = 10
-    SPINE_BEND_ANGLE_MEAN: float = 120
-    SPINE_BEND_ANGLE_STD: float = 20
-    SHOULDER_ANGLE_DIFF_THRESHOLD: float = 30
-    HIP_ANGLE_MEAN: float = 90
-    HIP_ANGLE_STD: float = 20
-    KNEE_STRAIGHT_THRESHOLD: float = 160
+    SPINE_ANGLE_MEAN: float = 170.0
+    SPINE_ANGLE_STD: float = max(10.0, 0.001)  # 确保不为零
+    SPINE_BEND_ANGLE_MEAN: float = 120.0
+    SPINE_BEND_ANGLE_STD: float = max(20.0, 0.001)  # 确保不为零
+    SHOULDER_ANGLE_DIFF_THRESHOLD: float = max(30.0, 0.001)
+    HIP_ANGLE_MEAN: float = 90.0
+    HIP_ANGLE_STD: float = max(20.0, 0.001)
+    KNEE_STRAIGHT_THRESHOLD: float = max(160.0, 0.001)
     KNEE_BEND_ANGLE_MEAN: float = 60
     KNEE_BEND_ANGLE_STD: float = 15
+    SHOULDER_HEIGHT_THRESHOLD: float = 0  # 肩膀高度阈值，用于判断手臂抬起
+    WRIST_VELOCITY_THRESHOLD: float = 5   # 手腕运动速度阈值
+    TURN_ANGLE_THRESHOLD: float = 45      # 转身角度阈值
+    SQUAT_ANGLE_THRESHOLD: float = 130    # 下蹲角度阈值
 
 class EnhancedPoseFeatureExtractor:
     @staticmethod
@@ -110,71 +114,98 @@ class TemporalActionRecognizer:
 class ActionClassifier:
     @staticmethod
     def classify_group1(features: Dict[str, float]) -> int:
+        """第一组：1.站直 2.弯曲 3.转身 4.弯曲同时转身"""
         spine_angle = features['spine']
         shoulder_angle_diff = features['shoulder']
-        spine_velocity = features.get('spine_velocity', 0)
-
-        probs = np.array([
-            norm(Constants.SPINE_ANGLE_MEAN, Constants.SPINE_ANGLE_STD).pdf(spine_angle),
-            norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle),
-            shoulder_angle_diff > Constants.SHOULDER_ANGLE_DIFF_THRESHOLD,
-            norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle) * (spine_velocity > 5)
-        ])
+        spine_velocity = features.get('spine_angular_velocity', 0)
+        
+        # 计算各个动作的概率
+        probs = np.zeros(4)
+        
+        # 1. 站直
+        probs[0] = norm(Constants.SPINE_ANGLE_MEAN, Constants.SPINE_ANGLE_STD).pdf(spine_angle) * \
+                   (shoulder_angle_diff < Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+        
+        # 2. 弯曲
+        probs[1] = norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle) * \
+                   (shoulder_angle_diff < Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+        
+        # 3. 转身
+        probs[2] = (shoulder_angle_diff > Constants.SHOULDER_ANGLE_DIFF_THRESHOLD) * \
+                   (spine_angle > Constants.SPINE_ANGLE_MEAN - Constants.SPINE_ANGLE_STD)
+        
+        # 4. 弯曲同时转身
+        probs[3] = norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle) * \
+                   (shoulder_angle_diff > Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+        
         return np.argmax(probs) + 1
 
     @staticmethod
     def classify_group2(features: Dict[str, float]) -> int:
+        """第二组：1.双臂低于肩膀 2.一个手臂高于肩膀 3.双臂高于肩膀"""
         left_wrist_height = features['left_wrist']
         right_wrist_height = features['right_wrist']
-        left_wrist_velocity = features.get('left_wrist_velocity', 0)
-        right_wrist_velocity = features.get('right_wrist_velocity', 0)
-
-        conditions = [
-            (left_wrist_height > 0 and right_wrist_height > 0) and (left_wrist_velocity < 5 and right_wrist_velocity < 5),
-            ((left_wrist_height < 0 and right_wrist_height > 0) or (left_wrist_height > 0 and right_wrist_height < 0)) and
-            (left_wrist_velocity > 5 or right_wrist_velocity > 5),
-            (left_wrist_height < 0 and right_wrist_height < 0) and (left_wrist_velocity > 10 and right_wrist_velocity > 10)
-        ]
-        return np.argmax(conditions) + 1
+        
+        # 使用相对于肩膀的高度判断
+        left_above = left_wrist_height < Constants.SHOULDER_HEIGHT_THRESHOLD
+        right_above = right_wrist_height < Constants.SHOULDER_HEIGHT_THRESHOLD
+        
+        if not (left_above or right_above):
+            return 1  # 双臂低于肩膀
+        elif left_above != right_above:
+            return 2  # 一个手臂高于肩膀
+        else:
+            return 3  # 双臂高于肩膀
 
     @staticmethod
     def classify_group3(features: Dict[str, float]) -> int:
+        """第三组：1.坐姿 2.双腿站直 3.单腿站直 4.双腿弯曲 5.单腿弯曲站立 6.跪姿或者蹲姿"""
         left_hip_angle = features['left_hip']
         right_hip_angle = features['right_hip']
-        left_hip_velocity = features.get('left_hip_velocity', 0)
-        right_hip_velocity = features.get('right_hip_velocity', 0)
-
-        probs = np.array([
-            norm(Constants.HIP_ANGLE_MEAN, Constants.HIP_ANGLE_STD).pdf(left_hip_angle) *
-            norm(Constants.HIP_ANGLE_MEAN, Constants.HIP_ANGLE_STD).pdf(right_hip_angle),
-            (left_hip_angle > Constants.KNEE_STRAIGHT_THRESHOLD and right_hip_angle > Constants.KNEE_STRAIGHT_THRESHOLD) and
-            (left_hip_velocity < 5 and right_hip_velocity < 5),
-            ((left_hip_angle > Constants.KNEE_STRAIGHT_THRESHOLD > right_hip_angle) or
-             (left_hip_angle < Constants.KNEE_STRAIGHT_THRESHOLD < right_hip_angle)) and
-            (left_hip_velocity > 5 or right_hip_velocity > 5),
-            (left_hip_angle < Constants.KNEE_STRAIGHT_THRESHOLD and right_hip_angle < Constants.KNEE_STRAIGHT_THRESHOLD) and
-            (left_hip_velocity < 5 and right_hip_velocity < 5),
-            ((left_hip_angle < Constants.KNEE_STRAIGHT_THRESHOLD < right_hip_angle) or
-             (left_hip_angle > Constants.KNEE_STRAIGHT_THRESHOLD > right_hip_angle)) and
-            (left_hip_velocity > 10 or right_hip_velocity > 10),
-            norm(Constants.KNEE_BEND_ANGLE_MEAN, Constants.KNEE_BEND_ANGLE_STD).pdf(left_hip_angle) *
-            norm(Constants.KNEE_BEND_ANGLE_MEAN, Constants.KNEE_BEND_ANGLE_STD).pdf(right_hip_angle) and
-            (left_hip_velocity > 15 and right_hip_velocity > 15)
-        ])
-        return np.argmax(probs) + 1
+        
+        # 判断腿部状态
+        left_straight = left_hip_angle > Constants.KNEE_STRAIGHT_THRESHOLD
+        right_straight = right_hip_angle > Constants.KNEE_STRAIGHT_THRESHOLD
+        left_bent = left_hip_angle < Constants.SQUAT_ANGLE_THRESHOLD
+        right_bent = right_hip_angle < Constants.SQUAT_ANGLE_THRESHOLD
+        
+        if left_hip_angle < Constants.HIP_ANGLE_MEAN and right_hip_angle < Constants.HIP_ANGLE_MEAN:
+            return 1  # 坐姿
+        elif left_straight and right_straight:
+            return 2  # 双腿站直
+        elif left_straight != right_straight:
+            return 3  # 单腿站直
+        elif left_bent and right_bent:
+            return 6  # 跪姿或蹲姿
+        elif left_bent != right_bent:
+            return 5  # 单腿弯曲站立
+        else:
+            return 4  # 双腿弯曲
 
 def recognize_action(pose: np.ndarray, temporal_recognizer: TemporalActionRecognizer) -> Dict[str, int]:
     temporal_recognizer.update(pose)
     features = temporal_recognizer.extract_features()
 
     if not features:
-        return {}
+        return {
+            'group1': 0,
+            'group2': 0,
+            'group3': 0
+        }
 
-    return {
-        'group1': ActionClassifier.classify_group1(features),
-        'group2': ActionClassifier.classify_group2(features),
-        'group3': ActionClassifier.classify_group3(features)
-    }
+    try:
+        return {
+            'group1': ActionClassifier.classify_group1(features),
+            'group2': ActionClassifier.classify_group2(features),
+            'group3': ActionClassifier.classify_group3(features)
+        }
+    except Exception as e:
+        print(f"Error in action recognition: {e}")
+        return {
+            'group1': 0,
+            'group2': 0,
+            'group3': 0
+        }
 
 def calculate_uncertainty(pose: np.ndarray, temporal_recognizer: TemporalActionRecognizer) -> float:
     features = temporal_recognizer.extract_features()
@@ -190,3 +221,62 @@ def calculate_uncertainty(pose: np.ndarray, temporal_recognizer: TemporalActionR
     feature_consistency = np.std(static_features)
 
     return 1 / (1 + np.exp(-(pose_stability + feature_consistency)))
+
+def calculate_action_confidence(features: Dict[str, float], group: int, action: int) -> float:
+    """计算动作识别的置信度"""
+    if not features:
+        return 0.0
+        
+    try:
+        if group == 1:
+            spine_angle = features.get('spine', 0)
+            shoulder_diff = features.get('shoulder', 0)
+            
+            # 添加除零保护
+            if action == 1:  # 站直
+                angle_diff = abs(spine_angle - Constants.SPINE_ANGLE_MEAN)
+                if Constants.SPINE_ANGLE_STD == 0:
+                    return 0.0
+                return max(0, min(1, 1 - angle_diff / max(Constants.SPINE_ANGLE_STD, 0.001)))
+                
+            elif action == 2:  # 弯曲
+                angle_diff = abs(spine_angle - Constants.SPINE_BEND_ANGLE_MEAN)
+                if Constants.SPINE_BEND_ANGLE_STD == 0:
+                    return 0.0
+                return max(0, min(1, 1 - angle_diff / max(Constants.SPINE_BEND_ANGLE_STD, 0.001)))
+                
+            elif action == 3:  # 转身
+                return min(1, shoulder_diff / Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+            elif action == 4:  # 弯曲同时转身
+                bend_conf = max(0, 1 - abs(spine_angle - Constants.SPINE_BEND_ANGLE_MEAN) / Constants.SPINE_BEND_ANGLE_STD)
+                turn_conf = min(1, shoulder_diff / Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+                return (bend_conf + turn_conf) / 2
+            
+        elif group == 2:
+            left_height = features['left_wrist']
+            right_height = features['right_wrist']
+            threshold = Constants.SHOULDER_HEIGHT_THRESHOLD
+            if action == 1:  # 双臂低于肩膀
+                return min(1, (left_height + right_height) / (2 * threshold))
+            elif action == 2:  # 一个手臂高于肩膀
+                return abs(left_height - right_height) / threshold
+            elif action == 3:  # 双臂高于肩膀
+                return min(1, (-left_height - right_height) / (2 * threshold))
+            
+        elif group == 3:
+            left_hip = features['left_hip']
+            right_hip = features['right_hip']
+            if action == 1:  # 坐姿
+                return max(0, 1 - (left_hip + right_hip) / (2 * Constants.HIP_ANGLE_MEAN))
+            elif action in [2, 3]:  # 站直
+                straight_conf = (left_hip + right_hip) / (2 * Constants.KNEE_STRAIGHT_THRESHOLD)
+                return min(1, straight_conf)
+            elif action in [4, 5, 6]:  # 弯曲
+                bend_conf = 1 - (left_hip + right_hip) / (2 * Constants.SQUAT_ANGLE_THRESHOLD)
+                return min(1, max(0, bend_conf))
+            
+    except Exception as e:
+        print(f"Error calculating confidence: {e}")
+        return 0.0
+    
+    return 0.5  # 默认置信度
