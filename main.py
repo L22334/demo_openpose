@@ -166,7 +166,7 @@ def process_frame(frame, opWrapper, pose_model, pose_kf, temporal_recognizer):
 
 
 def main():
-    video_path = "video/deal2.mp4"
+    video_path = "video/deal.mp4"
     opWrapper = initialize_openpose()
     pose_model = load_pose_model()
     pose_kf = PoseKalmanFilter(num_keypoints=13)

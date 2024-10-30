@@ -58,15 +58,7 @@ class EnhancedPoseFeatureExtractor:
             'hand_to_hip_right': np.linalg.norm(pose[RIGHT_WRIST] - pose[RIGHT_HIP]),
         }
 
-        # 添加更多相关特征
-        torso_angle = EnhancedPoseFeatureExtractor.calculate_angle(mid_shoulder, mid_hip, vertical_line)
-        leg_symmetry = abs(angles['left_hip'] - angles['right_hip'])
-        arm_height_diff = abs(heights['left_wrist'] - heights['right_wrist'])
-        
-        return {**angles, **heights, **symmetry, **distances, 
-                'torso_angle': torso_angle, 
-                'leg_symmetry': leg_symmetry,
-                'arm_height_diff': arm_height_diff}
+        return {**angles, **heights, **symmetry, **distances}
 
     @staticmethod
     def extract_dynamic_features(pose_history: List[np.ndarray]) -> Dict[str, float]:
@@ -100,18 +92,12 @@ class EnhancedPoseFeatureExtractor:
             'spine_angular_acceleration': float(np.mean(np.abs(angular_accelerations)))
         })
 
-        # 添加更多动态特征
-        pose_change_rate = np.mean(np.abs(np.diff(pose_history, axis=0)))
-        
-        dynamic_features['pose_change_rate'] = float(np.mean(pose_change_rate))
-        
         return dynamic_features
 
 class TemporalActionRecognizer:
-    def __init__(self, window_size: int = 5):  # 减小窗口大小以提高响应速度
+    def __init__(self, window_size: int = 10):
         self.window_size = window_size
         self.pose_history = deque(maxlen=window_size)
-        self.action_history = deque(maxlen=window_size)
 
     def update(self, pose: np.ndarray):
         self.pose_history.append(pose)
@@ -125,35 +111,33 @@ class TemporalActionRecognizer:
 
         return {**static_features, **dynamic_features}
 
-    def smooth_action(self, current_action: Dict[str, int]) -> Dict[str, int]:
-        self.action_history.append(current_action)
-        
-        if len(self.action_history) < self.window_size:
-            return current_action
-
-        smoothed_action = {}
-        for group in ['group1', 'group2', 'group3']:
-            actions = [action[group] for action in self.action_history]
-            # 使用加权投票,最近的动作权重更大
-            weighted_actions = [(action, weight) for action, weight in zip(actions, range(1, len(actions)+1))]
-            smoothed_action[group] = max(weighted_actions, key=lambda x: x[1])[0]
-
-        return smoothed_action
-
 class ActionClassifier:
     @staticmethod
     def classify_group1(features: Dict[str, float]) -> int:
         """第一组：1.站直 2.弯曲 3.转身 4.弯曲同时转身"""
         spine_angle = features['spine']
         shoulder_angle_diff = features['shoulder']
-        spine_velocity = features.get('spine_velocity', 0)
-
-        probs = np.array([
-            norm(Constants.SPINE_ANGLE_MEAN, Constants.SPINE_ANGLE_STD).pdf(spine_angle),
-            norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle),
-            shoulder_angle_diff > Constants.SHOULDER_ANGLE_DIFF_THRESHOLD,
-            norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle) * (spine_velocity > 5)
-        ])
+        spine_velocity = features.get('spine_angular_velocity', 0)
+        
+        # 计算各个动作的概率
+        probs = np.zeros(4)
+        
+        # 1. 站直
+        probs[0] = norm(Constants.SPINE_ANGLE_MEAN, Constants.SPINE_ANGLE_STD).pdf(spine_angle) * \
+                   (shoulder_angle_diff < Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+        
+        # 2. 弯曲
+        probs[1] = norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle) * \
+                   (shoulder_angle_diff < Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+        
+        # 3. 转身
+        probs[2] = (shoulder_angle_diff > Constants.SHOULDER_ANGLE_DIFF_THRESHOLD) * \
+                   (spine_angle > Constants.SPINE_ANGLE_MEAN - Constants.SPINE_ANGLE_STD)
+        
+        # 4. 弯曲同时转身
+        probs[3] = norm(Constants.SPINE_BEND_ANGLE_MEAN, Constants.SPINE_BEND_ANGLE_STD).pdf(spine_angle) * \
+                   (shoulder_angle_diff > Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+        
         return np.argmax(probs) + 1
 
     @staticmethod
@@ -237,3 +221,62 @@ def calculate_uncertainty(pose: np.ndarray, temporal_recognizer: TemporalActionR
     feature_consistency = np.std(static_features)
 
     return 1 / (1 + np.exp(-(pose_stability + feature_consistency)))
+
+def calculate_action_confidence(features: Dict[str, float], group: int, action: int) -> float:
+    """计算动作识别的置信度"""
+    if not features:
+        return 0.0
+        
+    try:
+        if group == 1:
+            spine_angle = features.get('spine', 0)
+            shoulder_diff = features.get('shoulder', 0)
+            
+            # 添加除零保护
+            if action == 1:  # 站直
+                angle_diff = abs(spine_angle - Constants.SPINE_ANGLE_MEAN)
+                if Constants.SPINE_ANGLE_STD == 0:
+                    return 0.0
+                return max(0, min(1, 1 - angle_diff / max(Constants.SPINE_ANGLE_STD, 0.001)))
+                
+            elif action == 2:  # 弯曲
+                angle_diff = abs(spine_angle - Constants.SPINE_BEND_ANGLE_MEAN)
+                if Constants.SPINE_BEND_ANGLE_STD == 0:
+                    return 0.0
+                return max(0, min(1, 1 - angle_diff / max(Constants.SPINE_BEND_ANGLE_STD, 0.001)))
+                
+            elif action == 3:  # 转身
+                return min(1, shoulder_diff / Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+            elif action == 4:  # 弯曲同时转身
+                bend_conf = max(0, 1 - abs(spine_angle - Constants.SPINE_BEND_ANGLE_MEAN) / Constants.SPINE_BEND_ANGLE_STD)
+                turn_conf = min(1, shoulder_diff / Constants.SHOULDER_ANGLE_DIFF_THRESHOLD)
+                return (bend_conf + turn_conf) / 2
+            
+        elif group == 2:
+            left_height = features['left_wrist']
+            right_height = features['right_wrist']
+            threshold = Constants.SHOULDER_HEIGHT_THRESHOLD
+            if action == 1:  # 双臂低于肩膀
+                return min(1, (left_height + right_height) / (2 * threshold))
+            elif action == 2:  # 一个手臂高于肩膀
+                return abs(left_height - right_height) / threshold
+            elif action == 3:  # 双臂高于肩膀
+                return min(1, (-left_height - right_height) / (2 * threshold))
+            
+        elif group == 3:
+            left_hip = features['left_hip']
+            right_hip = features['right_hip']
+            if action == 1:  # 坐姿
+                return max(0, 1 - (left_hip + right_hip) / (2 * Constants.HIP_ANGLE_MEAN))
+            elif action in [2, 3]:  # 站直
+                straight_conf = (left_hip + right_hip) / (2 * Constants.KNEE_STRAIGHT_THRESHOLD)
+                return min(1, straight_conf)
+            elif action in [4, 5, 6]:  # 弯曲
+                bend_conf = 1 - (left_hip + right_hip) / (2 * Constants.SQUAT_ANGLE_THRESHOLD)
+                return min(1, max(0, bend_conf))
+            
+    except Exception as e:
+        print(f"Error calculating confidence: {e}")
+        return 0.0
+    
+    return 0.5  # 默认置信度
