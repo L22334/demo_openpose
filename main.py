@@ -165,6 +165,30 @@ def process_frame(frame, opWrapper, pose_model, pose_kf, temporal_recognizer):
     return np.hstack((frame_resized, input_img, pred_img))
 
 
+def display_progress(combined_img, current_frame, total_frames):
+    progress = current_frame / total_frames
+    progress_bar_width = combined_img.shape[1] - 20
+    progress_x = int(progress * progress_bar_width)
+    
+    # 使用深色背景使进度条更清晰
+    cv2.rectangle(combined_img, 
+                 (10, combined_img.shape[0] - 35),
+                 (combined_img.shape[1] - 10, combined_img.shape[0] - 15),
+                 (0, 0, 0), -1)  # 黑色背景
+    
+    # 进度条
+    cv2.rectangle(combined_img, 
+                 (10, combined_img.shape[0] - 30),
+                 (progress_x, combined_img.shape[0] - 20),
+                 (0, 255, 0), -1)
+
+    # 进度文本
+    cv2.putText(combined_img, 
+               f"Processing: {int(progress * 100)}%",
+               (10, combined_img.shape[0] - 40),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+
 def main():
     video_path = "video/deal.mp4"
     opWrapper = initialize_openpose()
@@ -192,27 +216,7 @@ def main():
                                       pose_kf, temporal_recognizer)
 
             # 添加进度条
-            progress = current_frame / total_frames
-            progress_bar_width = combined_img.shape[1] - 20
-            progress_x = int(progress * progress_bar_width)
-            
-            # 使用深色背景使进度条更清晰
-            cv2.rectangle(combined_img, 
-                         (10, combined_img.shape[0] - 35),
-                         (combined_img.shape[1] - 10, combined_img.shape[0] - 15),
-                         (0, 0, 0), -1)  # 黑色背景
-            
-            # 进度条
-            cv2.rectangle(combined_img, 
-                         (10, combined_img.shape[0] - 30),
-                         (progress_x, combined_img.shape[0] - 20),
-                         (0, 255, 0), -1)
-
-            # 进度文本
-            cv2.putText(combined_img, 
-                       f"Processing: {int(progress * 100)}%",
-                       (10, combined_img.shape[0] - 40),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            display_progress(combined_img, current_frame, total_frames)
 
             cv2.imshow("OpenPose with Action Recognition", combined_img)
             current_frame += 1

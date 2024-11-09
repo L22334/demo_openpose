@@ -13,13 +13,13 @@ class Constants:
     SHOULDER_ANGLE_DIFF_THRESHOLD: float = max(30.0, 0.001)
     HIP_ANGLE_MEAN: float = 90.0
     HIP_ANGLE_STD: float = max(20.0, 0.001)
-    KNEE_STRAIGHT_THRESHOLD: float = max(160.0, 0.001)
+    KNEE_STRAIGHT_THRESHOLD: float = 160.0
     KNEE_BEND_ANGLE_MEAN: float = 60
     KNEE_BEND_ANGLE_STD: float = 15
     SHOULDER_HEIGHT_THRESHOLD: float = 0  # 肩膀高度阈值，用于判断手臂抬起
     WRIST_VELOCITY_THRESHOLD: float = 5   # 手腕运动速度阈值
     TURN_ANGLE_THRESHOLD: float = 45      # 转身角度阈值
-    SQUAT_ANGLE_THRESHOLD: float = 130    # 下蹲角度阈值
+    SQUAT_ANGLE_THRESHOLD: float = 130.0
 
 class EnhancedPoseFeatureExtractor:
     @staticmethod
@@ -57,6 +57,9 @@ class EnhancedPoseFeatureExtractor:
             'hand_to_hip_left': np.linalg.norm(pose[LEFT_WRIST] - pose[LEFT_HIP]),
             'hand_to_hip_right': np.linalg.norm(pose[RIGHT_WRIST] - pose[RIGHT_HIP]),
         }
+
+        # 添加调试信息
+        print(f"Left hip angle: {angles['left_hip']}, Right hip angle: {angles['right_hip']}")
 
         return {**angles, **heights, **symmetry, **distances}
 
@@ -106,8 +109,12 @@ class TemporalActionRecognizer:
         if len(self.pose_history) < self.window_size:
             return {}
 
-        static_features = EnhancedPoseFeatureExtractor.extract_static_features(self.pose_history[-1])
-        dynamic_features = EnhancedPoseFeatureExtractor.extract_dynamic_features(list(self.pose_history))
+        try:
+            static_features = EnhancedPoseFeatureExtractor.extract_static_features(self.pose_history[-1])
+            dynamic_features = EnhancedPoseFeatureExtractor.extract_dynamic_features(list(self.pose_history))
+        except Exception as e:
+            print(f"Error extracting features: {e}")
+            return {}
 
         return {**static_features, **dynamic_features}
 
@@ -163,11 +170,15 @@ class ActionClassifier:
         left_hip_angle = features['left_hip']
         right_hip_angle = features['right_hip']
         
-        # 判断腿部状态
+        # 判断腿部状���
         left_straight = left_hip_angle > Constants.KNEE_STRAIGHT_THRESHOLD
         right_straight = right_hip_angle > Constants.KNEE_STRAIGHT_THRESHOLD
         left_bent = left_hip_angle < Constants.SQUAT_ANGLE_THRESHOLD
         right_bent = right_hip_angle < Constants.SQUAT_ANGLE_THRESHOLD
+        
+        # 打印中间结果
+        print(f"Left straight: {left_straight}, Right straight: {right_straight}")
+        print(f"Left bent: {left_bent}, Right bent: {right_bent}")
         
         if left_hip_angle < Constants.HIP_ANGLE_MEAN and right_hip_angle < Constants.HIP_ANGLE_MEAN:
             return 1  # 坐姿
@@ -256,6 +267,9 @@ def calculate_action_confidence(features: Dict[str, float], group: int, action: 
             left_height = features['left_wrist']
             right_height = features['right_wrist']
             threshold = Constants.SHOULDER_HEIGHT_THRESHOLD
+            if threshold == 0:
+                print("Warning: Threshold is zero, adjusting to avoid division by zero.")
+                threshold = 1e-6  # 设置一个非常小的值以避免除以零
             if action == 1:  # 双臂低于肩膀
                 return min(1, (left_height + right_height) / (2 * threshold))
             elif action == 2:  # 一个手臂高于肩膀

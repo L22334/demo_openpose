@@ -16,4 +16,5 @@ class PosePredictor(nn.Module):
         x = x.view(x.size(0), 13, 2)  # 将输出重新调整为13个关键点的x和y坐标
         return x
 
-
+# 示例调用
+model = PosePredictor()

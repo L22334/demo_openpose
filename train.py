@@ -35,4 +35,4 @@ def train(model, train_loader, optimizer, criterion, epochs=10):
 # 示例调用
 train(model, train_loader, optimizer, criterion, epochs=30)
 # 保存模型
-torch.save(model.state_dict(), 'weights/pose_predictor_epoch30.pth')
+torch.save(model.state_dict(), 'pose_predictor_epoch30.pth')
